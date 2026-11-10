@@ -170,3 +170,6 @@ experiments
 runs
 video
 wandb
+
+# cluster job logs
+logs/

@@ -298,7 +298,12 @@ class ObjectRewardRequiredEventsEnvTilesetExploration(BaselineRewardEnv):
     def get_game_state_reward(self):
         _, wBagItems = self.pyboy.symbol_lookup("wBagItems")
         numBagItems = self.read_m("wNumBagItems")
-        bag_item_ids = set(self.pyboy.memory[wBagItems : wBagItems + 2 * numBagItems : 2])
+        # PyBoy rejects empty slices (start == end), so guard the empty-bag case.
+        bag_item_ids = (
+            set(self.pyboy.memory[wBagItems : wBagItems + 2 * numBagItems : 2])
+            if numBagItems > 0
+            else set()
+        )
 
         return (
             {
@@ -369,7 +374,12 @@ class ObjectRewardRequiredEventsMapIds(BaselineRewardEnv):
     def get_game_state_reward(self) -> dict[str, float]:
         _, wBagItems = self.pyboy.symbol_lookup("wBagItems")
         numBagItems = self.read_m("wNumBagItems")
-        bag_item_ids = set(self.pyboy.memory[wBagItems : wBagItems + 2 * numBagItems : 2])
+        # PyBoy rejects empty slices (start == end), so guard the empty-bag case.
+        bag_item_ids = (
+            set(self.pyboy.memory[wBagItems : wBagItems + 2 * numBagItems : 2])
+            if numBagItems > 0
+            else set()
+        )
 
         return (
             {
