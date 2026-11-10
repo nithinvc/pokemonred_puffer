@@ -1741,6 +1741,9 @@ class RedGymEnv(Env):
     def read_party(self):
         _, addr = self.pyboy.symbol_lookup("wPartySpecies")
         party_length = self.pyboy.memory[self.pyboy.symbol_lookup("wPartyCount")[1]]
+        # PyBoy rejects empty slices (start == end).
+        if party_length == 0:
+            return []
         return self.pyboy.memory[addr : addr + party_length]
 
     @abstractmethod
@@ -1890,6 +1893,9 @@ class RedGymEnv(Env):
     def get_items_in_bag(self) -> Iterable[Items]:
         num_bag_items = self.read_m("wNumBagItems")
         _, addr = self.pyboy.symbol_lookup("wBagItems")
+        # PyBoy rejects empty slices (start == end).
+        if num_bag_items == 0:
+            return []
         return [Items(i) for i in self.pyboy.memory[addr : addr + 2 * num_bag_items][::2]]
 
     def get_hm_count(self) -> int:
@@ -1925,6 +1931,9 @@ class RedGymEnv(Env):
     def get_required_items(self) -> set[str]:
         wNumBagItems = self.read_m("wNumBagItems")
         _, wBagItems = self.pyboy.symbol_lookup("wBagItems")
+        # PyBoy rejects empty slices (start == end).
+        if wNumBagItems == 0:
+            return set()
         bag_items = self.pyboy.memory[wBagItems : wBagItems + wNumBagItems * 2 : 2]
         return {Items(item).name for item in bag_items if Items(item) in REQUIRED_ITEMS}
 

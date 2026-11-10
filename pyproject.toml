@@ -21,7 +21,7 @@ dependencies = [
     "omegaconf",
     "opencv-python==3.4.17.63",
     "psutil",
-    "pyboy>=2",
+    "pyboy>=2,<2.8",  # 2.8 changed the save-state format; bundled .state files need <=2.7
     "pynvml",
     "pufferlib @ git+https://github.com/thatguy11325/PufferLib.git@1.0",
     "scikit-image",
