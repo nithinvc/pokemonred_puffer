@@ -173,3 +173,6 @@ wandb
 
 # cluster job logs
 logs/
+
+# FastBoy build artifacts
+pokemonred_puffer/fastboy/_core.c

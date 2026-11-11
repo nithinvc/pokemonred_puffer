@@ -1,0 +1,76 @@
+#!/bin/bash
+# Pokemon Red PPO training on one Barfoot visualization node (1 L40S, 192 CPUs).
+#
+# Usage (from the repo root on Barfoot, ~/Workspace/pokemonred_puffer):
+#   qsub -v EXP_NAME=gym2-1 cluster/barfoot_train.pbs
+#   qsub -q debug -l walltime=00:30:00 -v EXP_NAME=smoke-1,TRAIN_SECONDS=1080 cluster/barfoot_train.pbs
+#
+# Env vars (pass with qsub -v):
+#   EXP_NAME       wandb run id/name (required). Reusing it only reattaches the
+#                  wandb run; training state is NOT resumed from checkpoints.
+#   CONFIG         config file (default configs/repro-gym2.yaml)
+#   WRAPPERS       wrapper set (default no_stream: no public websocket streaming)
+#   WANDB_GROUP    wandb group (default: none)
+#   TRAIN_SECONDS  if set, send SIGINT after this many seconds so the trainer
+#                  saves a checkpoint and exits cleanly (used for smoke tests)
+#PBS -A ODEFN5169CYFZ
+#PBS -q frontier
+#PBS -l select=1:ncpus=192:mpiprocs=192:ngpus=1
+#PBS -l walltime=24:00:00
+#PBS -N pokered
+#PBS -j oe
+
+set -eo pipefail
+: "${EXP_NAME:?set EXP_NAME (qsub -v EXP_NAME=...)}"
+CONFIG="${CONFIG:-configs/repro-gym2.yaml}"
+WRAPPERS="${WRAPPERS:-no_stream}"
+
+cd "${PBS_O_WORKDIR}"
+mkdir -p logs
+# PBS only copies its own log back at the end; tee a live log we can tail.
+exec > >(tee -a "logs/pokered.${PBS_JOBID%%.*}.out") 2>&1
+source .venv/bin/activate
+
+echo "=== $(date) host=$(hostname) job=${PBS_JOBID} exp=${EXP_NAME} config=${CONFIG}"
+nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv
+nproc
+python -c "import torch; print('torch', torch.__version__, 'cuda ok:', torch.cuda.is_available())"
+
+# Fall back to offline wandb if compute nodes cannot reach wandb.
+if curl -s -o /dev/null -m 10 https://api.forge.coreweave.com; then
+  echo "wandb: online"
+else
+  echo "wandb: compute node has no egress, logging offline (sync later from login node)"
+  export WANDB_MODE=offline
+fi
+export WANDB_DIR="${PBS_O_WORKDIR}"
+if [[ -f "${HOME}/.config/pokered/wandb_key" ]]; then
+  WANDB_API_KEY="$(<"${HOME}/.config/pokered/wandb_key")"
+  export WANDB_API_KEY
+fi
+if [[ -n "${WANDB_GROUP:-}" ]]; then
+  export WANDB_RUN_GROUP="${WANDB_GROUP}"
+fi
+
+cmd=(python -m pokemonred_puffer.train train
+  --config "${CONFIG}"
+  --wrappers-name "${WRAPPERS}"
+  --exp-name "${EXP_NAME}"
+  --rom-path red.gb
+  --track)
+
+if [[ -n "${TRAIN_SECONDS:-}" ]]; then
+  # SIGINT -> KeyboardInterrupt -> trainer __exit__ saves checkpoint and uploads model.
+  timeout -s INT -k 300 "${TRAIN_SECONDS}" "${cmd[@]}" || echo "train exited with $?"
+else
+  "${cmd[@]}"
+fi
+
+# Checkpoints go to runs/pokemon-red-<uuid> (train.py:180), not runs/${EXP_NAME}.
+echo "=== checkpoints"
+latest="$(ls -td runs/pokemon-red-* 2>/dev/null | head -1)"
+if [[ -n "${latest}" ]]; then
+  du -sh "${latest}"
+  ls -la "${latest}" | head -20
+fi
+echo "=== done $(date)"

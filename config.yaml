@@ -6,6 +6,9 @@ wandb:
 env:
   # If true, run without rendering every step.
   headless: True
+  # Emulator backend. "fastboy" (default) is a C port of PyBoy 2.7's core with identical
+  # emulation, screen and save states, ~2-2.5x faster; "pyboy" uses PyBoy itself.
+  emulator: fastboy
   # Directory to store video output.
   video_dir: video
   # Directory with pyboy save states to load from.

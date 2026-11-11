@@ -1,7 +1,9 @@
 # Pad to 32 Bytes
-from ctypes import LittleEndianStructure, Union, c_uint8
+from ctypes import LittleEndianStructure, c_uint8
 
 from pyboy import PyBoy
+
+from pokemonred_puffer.data.bitfields import bit_positions, read_ram
 
 
 class MissableFlagsBits(LittleEndianStructure):
@@ -237,24 +239,38 @@ class MissableFlagsBits(LittleEndianStructure):
     ]
 
 
-class MissableFlags(Union):
-    # These missable flags is a 32 byte object
-    _fields_ = [("b", MissableFlagsBits), ("asbytes", c_uint8 * 32)]
+_MISSABLE_BITS = bit_positions(MissableFlagsBits)
+_MISSABLE_NAMES = [x[0] for x in MissableFlagsBits._fields_]
+
+
+class MissableFlags:
+    """Snapshot of the 32 missable-object flag bytes (same API and values as the former ctypes Union)."""
+
+    __slots__ = ("emu", "raw")
 
     def __init__(self, emu: PyBoy):
-        super().__init__()
         self.emu = emu
-        self.asbytes = (c_uint8 * 32)(*emu.memory[0xD5A6 : 0xD5A6 + 32])
+        self.raw = bytearray(read_ram(emu, 0xD5A6, 32))
+
+    @property
+    def asbytes(self):
+        return (c_uint8 * 32).from_buffer_copy(self.raw)
+
+    @property
+    def b(self):
+        return MissableFlagsBits.from_buffer_copy(self.raw)
 
     def get_missable(self, missable: str) -> int:
-        return getattr(self.b, missable)
+        byte, bit = _MISSABLE_BITS[missable]
+        return (self.raw[byte] >> bit) & 1
 
     def set_missable(self, missable: str, value: bool):
         # This is O(N) but it's so rare that I'm not too worried about it
-        idx = [x[0] for x in self.b._fields_].index(missable)
+        idx = _MISSABLE_NAMES.index(missable)
         addr = 0xD5A6 + idx // 8
         bit = idx % 8
         mask = int(value) << bit
 
         self.emu.memory[addr] = (self.emu.memory[addr] & ~mask) | mask
-        setattr(self.b, missable, int(value))
+        byte, b = _MISSABLE_BITS[missable]
+        self.raw[byte] = (self.raw[byte] & ~(1 << b)) | ((int(value) & 1) << b)

@@ -1,8 +1,10 @@
-from ctypes import c_uint8, LittleEndianStructure, Union
+from ctypes import c_uint8, LittleEndianStructure
 import re
 from typing import Iterator
 
 from pyboy import PyBoy
+
+from pokemonred_puffer.data.bitfields import bit_positions, read_ram
 
 EVENT_FLAGS_START = 0xD747
 EVENTS_FLAGS_LENGTH = 320
@@ -2574,38 +2576,65 @@ class EventFlagsBits(LittleEndianStructure):
     ]
 
 
-class EventFlags(Union):
-    _fields_ = [("b", EventFlagsBits), ("asbytes", c_uint8 * 320)]
+_EVENT_BITS = bit_positions(EventFlagsBits)
+_EVENT_NAMES = [x[0] for x in EventFlagsBits._fields_]
+
+
+class EventFlags:
+    """Snapshot of the 320 event-flag bytes (same API and values as the former ctypes Union)."""
+
+    __slots__ = ("emu", "raw")
 
     def __init__(self, emu: PyBoy):
-        super().__init__()
         self.emu = emu
-        self.asbytes = (c_uint8 * 320)(
-            *emu.memory[EVENT_FLAGS_START : EVENT_FLAGS_START + EVENTS_FLAGS_LENGTH]
-        )
+        self.raw = bytearray(read_ram(emu, EVENT_FLAGS_START, EVENTS_FLAGS_LENGTH))
+
+    @property
+    def asbytes(self):
+        return (c_uint8 * 320).from_buffer_copy(self.raw)
+
+    @property
+    def b(self):
+        return EventFlagsBits.from_buffer_copy(self.raw)
 
     def get_event(self, event_name: str) -> int:
         """
         1 if true, 0 if false
         """
-        return getattr(self.b, event_name)
+        byte, bit = _EVENT_BITS[event_name]
+        return (self.raw[byte] >> bit) & 1
 
     def get_events(self, event_names: Iterator[str]) -> Iterator[int]:
         """
         1 if true, 0 if false
         """
+        raw = self.raw
         for event_name in event_names:
-            yield getattr(self.b, event_name)
+            byte, bit = _EVENT_BITS[event_name]
+            yield (raw[byte] >> bit) & 1
+
+    def count_set(self, mask: int) -> int:
+        """Number of set flags among the bits in `mask` (see `events_mask`)."""
+        return (int.from_bytes(self.raw, "little") & mask).bit_count()
 
     def set_event(self, event_name: str, value: bool):
         # This is O(N) but it's so rare that I'm not too worried about it
-        idx = [x[0] for x in self.b._fields_].index(event_name)
+        idx = _EVENT_NAMES.index(event_name)
         addr = EVENT_FLAGS_START + idx // 8
         bit = idx % 8
         mask = int(value) << bit
 
         self.emu.memory[addr] = (self.emu.memory[addr] & ~mask) | mask
-        setattr(self.b, event_name, int(value))
+        byte, b = _EVENT_BITS[event_name]
+        self.raw[byte] = (self.raw[byte] & ~(1 << b)) | ((int(value) & 1) << b)
+
+
+def events_mask(event_names) -> int:
+    mask = 0
+    for name in event_names:
+        byte, bit = _EVENT_BITS[name]
+        mask |= 1 << (8 * byte + bit)
+    return mask
 
 
 EVENTS = {

@@ -14,6 +14,7 @@ def environment_fixture() -> Generator[RedGymEnv, None, None]:
         pyboy_mock.return_value.symbol_lookup.return_value = (1, 2)
         env_config: DictConfig = OmegaConf.load("config.yaml").env
         env_config.gb_path = ""
+        env_config.emulator = "pyboy"  # the mock patches PyBoy; FastBoy would open the ROM
         yield RedGymEnv(env_config=env_config)
 
 
