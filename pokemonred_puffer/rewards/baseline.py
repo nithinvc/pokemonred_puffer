@@ -1,13 +1,21 @@
 import numpy as np
 from omegaconf import DictConfig, OmegaConf
 
-from pokemonred_puffer.data.events import EVENTS, REQUIRED_EVENTS
+from pokemonred_puffer.data.events import EVENTS, REQUIRED_EVENTS, events_mask
+from pokemonred_puffer.data.events import _EVENT_BITS as EVENT_BITS
 from pokemonred_puffer.data.items import REQUIRED_ITEMS, USEFUL_ITEMS
 from pokemonred_puffer.data.tilesets import Tilesets
 from pokemonred_puffer.environment import RedGymEnv
 
 
 MUSEUM_TICKET = (0xD754, 0)
+
+# Precomputed in the iteration order of the original sets, so dicts built from them have the same
+# key order (and the reward sum the same float summation order) as before.
+_EVENTS_MASK = events_mask(EVENTS)
+_REQUIRED_EVENT_BITS = [(event, *EVENT_BITS[event]) for event in REQUIRED_EVENTS]
+_REQUIRED_ITEMS_NV = [(item.name, item.value) for item in REQUIRED_ITEMS]
+_USEFUL_ITEMS_NV = [(item.name, item.value) for item in USEFUL_ITEMS]
 
 
 class BaselineRewardEnv(RedGymEnv):
@@ -65,8 +73,9 @@ class BaselineRewardEnv(RedGymEnv):
 
     def get_all_events_reward(self):
         # adds up all event flags, exclude museum ticket
+        # == np.sum(self.events.get_events(EVENTS)) (a Python int)
         return max(
-            np.sum(self.events.get_events(EVENTS))
+            self.events.count_set(_EVENTS_MASK)
             - self.base_event_flags
             - int(
                 self.events.get_event("EVENT_BOUGHT_MUSEUM_TICKET"),
@@ -372,74 +381,66 @@ class ObjectRewardRequiredEventsEnvTilesetExploration(BaselineRewardEnv):
 
 class ObjectRewardRequiredEventsMapIds(BaselineRewardEnv):
     def get_game_state_reward(self) -> dict[str, float]:
-        _, wBagItems = self.pyboy.symbol_lookup("wBagItems")
+        rc = self.reward_config
+        wBagItems = self._sym["wBagItems"]
         numBagItems = self.read_m("wNumBagItems")
         # PyBoy rejects empty slices (start == end), so guard the empty-bag case.
         bag_item_ids = (
-            set(self.pyboy.memory[wBagItems : wBagItems + 2 * numBagItems : 2])
-            if numBagItems > 0
-            else set()
+            set(self.read_bytes(wBagItems, 2 * numBagItems)[::2]) if numBagItems > 0 else set()
         )
+        events_raw = self.events.raw
+        required_event = rc["required_event"]
+        required_item = rc["required_item"]
+        useful_item = rc["useful_item"]
 
         return (
             {
-                "cut_tiles": self.reward_config["cut_tiles"] * sum(self.cut_tiles.values()),
-                "event": self.reward_config["event"] * self.update_max_event_rew(),
-                "seen_pokemon": self.reward_config["seen_pokemon"] * np.sum(self.seen_pokemon),
-                "caught_pokemon": self.reward_config["caught_pokemon"]
-                * np.sum(self.caught_pokemon),
-                "obtained_move_ids": self.reward_config["obtained_move_ids"]
-                * np.sum(self.obtained_move_ids),
-                "hm_count": self.reward_config["hm_count"] * self.get_hm_count(),
-                "level": self.reward_config["level"] * self.get_levels_reward(),
-                "badges": self.reward_config["badges"] * self.get_badges(),
-                "valid_cut_coords": self.reward_config["valid_cut_coords"]
-                * len(self.valid_cut_coords.values()),
-                "invalid_cut_coords": self.reward_config["invalid_cut_coords"]
+                "cut_tiles": rc["cut_tiles"] * sum(self.cut_tiles.values()),
+                "event": rc["event"] * self.update_max_event_rew(),
+                # np.sum of a 0/1 uint8 array is np.uint64(count); keep that type
+                "seen_pokemon": rc["seen_pokemon"] * np.uint64(np.count_nonzero(self.seen_pokemon)),
+                "caught_pokemon": rc["caught_pokemon"]
+                * np.uint64(np.count_nonzero(self.caught_pokemon)),
+                "obtained_move_ids": rc["obtained_move_ids"] * np.sum(self.obtained_move_ids),
+                "hm_count": rc["hm_count"] * self.get_hm_count(),
+                "level": rc["level"] * self.get_levels_reward(),
+                "badges": rc["badges"] * self.get_badges(),
+                "valid_cut_coords": rc["valid_cut_coords"] * len(self.valid_cut_coords.values()),
+                "invalid_cut_coords": rc["invalid_cut_coords"]
                 * len(self.invalid_cut_coords.values()),
-                "start_menu": self.reward_config["start_menu"] * self.seen_start_menu,
-                "pokemon_menu": self.reward_config["pokemon_menu"] * self.seen_pokemon_menu,
-                "stats_menu": self.reward_config["stats_menu"] * self.seen_stats_menu,
-                "bag_menu": self.reward_config["bag_menu"] * self.seen_bag_menu,
+                "start_menu": rc["start_menu"] * self.seen_start_menu,
+                "pokemon_menu": rc["pokemon_menu"] * self.seen_pokemon_menu,
+                "stats_menu": rc["stats_menu"] * self.seen_stats_menu,
+                "bag_menu": rc["bag_menu"] * self.seen_bag_menu,
                 "explore_hidden_objs": sum(self.seen_hidden_objs.values()),
-                "explore_signs": sum(self.seen_signs.values())
-                * self.reward_config["explore_signs"],
-                "seen_action_bag_menu": self.seen_action_bag_menu
-                * self.reward_config["seen_action_bag_menu"],
-                "pokecenter_heal": self.pokecenter_heal * self.reward_config["pokecenter_heal"],
-                "rival3": self.reward_config["required_event"]
-                * int(self.read_m("wSSAnne2FCurScript") == 4),
-                "game_corner_rocket": self.reward_config["required_event"]
+                "explore_signs": sum(self.seen_signs.values()) * rc["explore_signs"],
+                "seen_action_bag_menu": self.seen_action_bag_menu * rc["seen_action_bag_menu"],
+                "pokecenter_heal": self.pokecenter_heal * rc["pokecenter_heal"],
+                "rival3": required_event * int(self.read_m("wSSAnne2FCurScript") == 4),
+                "game_corner_rocket": required_event
                 * float(self.missables.get_missable("HS_GAME_CORNER_ROCKET")),
-                "saffron_guard": self.reward_config["required_event"]
+                "saffron_guard": required_event
                 * float(self.flags.get_bit("BIT_GAVE_SAFFRON_GUARDS_DRINK")),
-                "lapras": self.reward_config["required_event"]
-                * float(self.flags.get_bit("BIT_GOT_LAPRAS")),
-                "a_press": len(self.a_press) * self.reward_config["a_press"],
-                "warps": len(self.seen_warps) * self.reward_config["explore_warps"],
-                "use_surf": self.reward_config["use_surf"] * self.use_surf,
-                "exploration": self.reward_config["exploration"] * np.sum(self.reward_explore_map),
-                "safari_zone": sum(
-                    self.reward_config["safari_zone"] * v for k, v in self.safari_zone_steps.items()
-                )
+                "lapras": required_event * float(self.flags.get_bit("BIT_GOT_LAPRAS")),
+                "a_press": len(self.a_press) * rc["a_press"],
+                "warps": len(self.seen_warps) * rc["explore_warps"],
+                "use_surf": rc["use_surf"] * self.use_surf,
+                "exploration": rc["exploration"] * np.sum(self.reward_explore_map),
+                "safari_zone": sum(rc["safari_zone"] * v for k, v in self.safari_zone_steps.items())
                 / 502.0,
-                "use_ball_count": self.reward_config["use_ball_count"] * self.use_ball_count,
-                "pokeflute_tiles": self.reward_config["pokeflute_tiles"]
-                * sum(self.pokeflute_tiles.values()),
-                "surf_tiles": self.reward_config["surf_tiles"] * sum(self.surf_tiles.values()),
+                "use_ball_count": rc["use_ball_count"] * self.use_ball_count,
+                "pokeflute_tiles": rc["pokeflute_tiles"] * sum(self.pokeflute_tiles.values()),
+                "surf_tiles": rc["surf_tiles"] * sum(self.surf_tiles.values()),
             }
             | {
-                event: self.reward_config["required_event"] * float(self.events.get_event(event))
-                for event in REQUIRED_EVENTS
+                event: required_event * float((events_raw[byte] >> bit) & 1)
+                for event, byte, bit in _REQUIRED_EVENT_BITS
             }
             | {
-                item.name: self.reward_config["required_item"] * float(item.value in bag_item_ids)
-                for item in REQUIRED_ITEMS
+                name: required_item * float(value in bag_item_ids)
+                for name, value in _REQUIRED_ITEMS_NV
             }
-            | {
-                item.name: self.reward_config["useful_item"] * float(item.value in bag_item_ids)
-                for item in USEFUL_ITEMS
-            }
+            | {name: useful_item * float(value in bag_item_ids) for name, value in _USEFUL_ITEMS_NV}
         )
 
     def get_levels_reward(self):

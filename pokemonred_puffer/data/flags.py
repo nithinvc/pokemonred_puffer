@@ -1,6 +1,8 @@
-from ctypes import LittleEndianStructure, Union, c_uint8
+from ctypes import LittleEndianStructure, c_uint8
 
 from pyboy import PyBoy
+
+from pokemonred_puffer.data.bitfields import field_layout, read_ram, symbol_addr
 
 
 class FlagsBits(LittleEndianStructure):
@@ -97,27 +99,45 @@ class FlagsBits(LittleEndianStructure):
     ]
 
 
-class Flags(Union):
-    _fields_ = [("b", FlagsBits), ("asbytes", c_uint8 * 13)]
+_FLAG_LAYOUT = field_layout(FlagsBits)
+_FLAG_NAMES = [x[0] for x in FlagsBits._fields_]
+
+
+class Flags:
+    """Snapshot of wStatusFlags1..wElite4Flags (same API and values as the former ctypes Union)."""
+
+    __slots__ = ("emu", "raw", "_value")
 
     def __init__(self, emu: PyBoy):
-        super().__init__()
         self.emu = emu
-        self.asbytes = (c_uint8 * 13)(
-            *emu.memory[
-                emu.symbol_lookup("wStatusFlags1")[1] : (emu.symbol_lookup("wElite4Flags")[1] + 1)
-            ]
-        )
+        start = symbol_addr(emu, "wStatusFlags1")
+        end = symbol_addr(emu, "wElite4Flags") + 1
+        raw = read_ram(emu, start, end - start)
+        if len(raw) > 13:
+            raise IndexError("too many initializers")
+        self.raw = bytearray(raw.ljust(13, b"\x00"))
+        self._value = int.from_bytes(self.raw, "little")
+
+    @property
+    def asbytes(self):
+        return (c_uint8 * 13).from_buffer_copy(self.raw)
+
+    @property
+    def b(self):
+        return FlagsBits.from_buffer_copy(self.raw)
 
     def get_bit(self, name: str) -> bool:
-        return bool(getattr(self.b, name))
+        shift, mask = _FLAG_LAYOUT[name]
+        return bool((self._value >> shift) & mask)
 
     def set_bit(self, name: str, value: bool):
         # This is O(N) but it's so rare that I'm not too worried about it
-        idx = [x[0] for x in self.b._fields_].index(name)
+        idx = _FLAG_NAMES.index(name)
         addr = self.emu.symbol_lookup("wStatusFlags1")[1] + idx // 8
         bit = idx % 8
         mask = int(value) << bit
 
         self.emu.memory[addr] = (self.emu.memory[addr] & ~mask) | mask
-        setattr(self.b, name, int(value))
+        shift, fmask = _FLAG_LAYOUT[name]
+        self._value = (self._value & ~(fmask << shift)) | ((int(value) & fmask) << shift)
+        self.raw[:] = self._value.to_bytes(13, "little")
