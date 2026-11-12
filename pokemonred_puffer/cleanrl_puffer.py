@@ -28,6 +28,7 @@ from rich.console import Console
 from rich.table import Table
 
 import wandb
+from pokemonred_puffer.dashboard import Dashboard
 from pokemonred_puffer.data.moves import Moves
 from pokemonred_puffer.data.species import Species
 from pokemonred_puffer.eval import make_pokemon_red_overlay
@@ -203,6 +204,19 @@ class CleanPuffeRL:
         self.taught_cut = False
         self.log = False
 
+        # "sections" (default): pokemonred_puffer/dashboard.py. "legacy": everything under
+        # environment/, averaged over the envs that reported this epoch.
+        self.layout = self.config.get("wandb_layout", "sections")
+        self.dashboard = None
+        self.pending_media = {}
+        if self.layout == "sections":
+            self.dashboard = Dashboard(
+                self.wandb_client, alerts=self.config.get("wandb_alerts", False)
+            )
+            if self.wandb_client is not None:
+                self.wandb_client.define_metric("overview/agent_steps")
+                self.wandb_client.define_metric("*", step_metric="overview/agent_steps")
+
         if self.config.archive_states:
             self.archive_path = pathlib.Path(datetime.now().strftime("%Y%m%d-%H%M%S"))
             self.archive_path.mkdir(exist_ok=False)
@@ -257,6 +271,8 @@ class CleanPuffeRL:
                 self.experience.store(o, value, actions, logprob, r, d, env_id, mask)
 
                 for i in info:
+                    if self.dashboard is not None:
+                        self.dashboard.ingest(i, self.global_step)
                     for k, v in pufferlib.utils.unroll_nested_dict(i):
                         if "state/" in k:
                             _, key = k.split("/")
@@ -454,13 +470,19 @@ class CleanPuffeRL:
                             # print(f"\tWaiting for message from env-id {key}")
                             self.env_send_queues[key].get()
 
-                    print(
-                        f"State migration to {self.archive_path}/{str(hash(new_state_key))} complete"
-                    )
+                    print(f"State migration to {hash(new_state_key)} complete")
+                    if self.dashboard is not None:
+                        self.dashboard.mark(
+                            "swarm_migration",
+                            f"{len(self.event_tracker)} envs -> {len(new_state_key)} required",
+                            self.global_step,
+                        )
 
             self.stats = {}
+            if self.dashboard is not None:
+                self.stats = self.dashboard_stats()
 
-            for k, v in self.infos.items():
+            for k, v in self.infos.items() if self.dashboard is None else ():
                 # Moves into models... maybe. Definitely moves.
                 # You could also just return infos and have it in demo
                 if "pokemon_exploration_map" in k and self.config.save_overlay is True:
@@ -477,7 +499,8 @@ class CleanPuffeRL:
                         continue
 
             if (
-                all(k in self.infos.keys() for k in ["env_ids", "species", "levels", "moves"])
+                self.dashboard is None
+                and all(k in self.infos.keys() for k in ["env_ids", "species", "levels", "moves"])
                 and self.wandb_client is not None
             ):
                 table = {}
@@ -514,6 +537,42 @@ class CleanPuffeRL:
                 )
 
         return self.stats, self.infos
+
+    def dashboard_stats(self) -> dict:
+        stats = self.dashboard.epoch_stats()
+        media_epoch = self.epoch % self.config.overlay_interval == 0
+        if self.wandb_client is None:
+            return {k: v for k, v in stats.items() if isinstance(v, (int, float))}
+        if media_epoch and self.config.save_overlay and "pokemon_exploration_map" in self.infos:
+            overlay = make_pokemon_red_overlay(
+                np.stack(self.infos["pokemon_exploration_map"], axis=0)
+            )
+            stats["exploration/map"] = wandb.Image(overlay)
+        if media_epoch and all(k in self.infos for k in ["env_ids", "species", "levels", "moves"]):
+            rows = {}
+            for env_id, species, levels, moves in zip(
+                self.infos["env_ids"],
+                self.infos["species"],
+                self.infos["levels"],
+                self.infos["moves"],
+            ):
+                rows[env_id] = [
+                    f"{Species(_species).name} @ {level} w/ {[Moves(m).name for m in _moves if m]}"
+                    if _species
+                    else ""
+                    for _species, level, _moves in zip(species, levels, moves)
+                ]
+            stats["party/roster"] = wandb.Table(
+                columns=["env_id"] + [f"slot_{i + 1}" for i in range(6)],
+                data=[[str(k)] + v for k, v in sorted(rows.items())],
+            )
+        if self.dashboard.timeline_dirty:
+            stats["overview/timeline"] = self.dashboard.timeline_table()
+        # Images, tables and histograms wait for the next wandb.log (at most every 5 s) so a
+        # short epoch can't drop them; self.stats keeps only scalars for print_dashboard.
+        for k in [k for k, v in stats.items() if not isinstance(v, (int, float))]:
+            self.pending_media[k] = stats.pop(k)
+        return stats
 
     @pufferlib.utils.profile
     def train(self):
@@ -654,16 +713,30 @@ class CleanPuffeRL:
                     and time.time() - self.last_log_time > 5.0
                 ):
                     self.last_log_time = time.time()
-                    self.wandb_client.log(
-                        {
-                            "Overview/SPS": self.profile.SPS,
-                            "Overview/agent_steps": self.global_step,
-                            "Overview/learning_rate": self.optimizer.param_groups[0]["lr"],
-                            **{f"environment/{k}": v for k, v in self.stats.items()},
-                            **{f"losses/{k}": v for k, v in self.losses.__dict__.items()},
-                            **{f"performance/{k}": v for k, v in self.profile},
-                        }
-                    )
+                    if self.dashboard is not None:
+                        self.wandb_client.log(
+                            {
+                                "overview/agent_steps": self.global_step,
+                                "overview/SPS": self.profile.SPS,
+                                "overview/learning_rate": self.optimizer.param_groups[0]["lr"],
+                                **self.stats,
+                                **self.pending_media,
+                                **{f"losses/{k}": v for k, v in self.losses.__dict__.items()},
+                                **{f"performance/{k}": v for k, v in self.profile},
+                            }
+                        )
+                        self.pending_media = {}
+                    else:
+                        self.wandb_client.log(
+                            {
+                                "Overview/SPS": self.profile.SPS,
+                                "Overview/agent_steps": self.global_step,
+                                "Overview/learning_rate": self.optimizer.param_groups[0]["lr"],
+                                **{f"environment/{k}": v for k, v in self.stats.items()},
+                                **{f"losses/{k}": v for k, v in self.losses.__dict__.items()},
+                                **{f"performance/{k}": v for k, v in self.profile},
+                            }
+                        )
 
             if self.epoch % self.config.checkpoint_interval == 0 or done_training:
                 self.save_checkpoint()

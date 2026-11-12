@@ -1,5 +1,9 @@
 """Human-readable milestone report for a training run.
 
+Runs logged with train.wandb_layout: sections already carry this in wandb
+(first_reached/* summary columns, overview/timeline table); this script is for
+older runs.
+
 Reads the trainer's state archive (archive_states: True), where each sub-folder
 is one distinct set of required events/items some env reached, holding a
 desc.txt (the set) and .state files. The earliest .state mtime in each folder
@@ -22,114 +26,12 @@ import bisect
 import html
 import os
 import subprocess
+import sys
 from datetime import datetime, timezone
 
-# Story order: (chapter, [(key, label), ...]). Keys are REQUIRED_EVENTS,
-# the 4 synthetic events from get_required_events, and REQUIRED_ITEMS names.
-CHAPTERS = [
-    ("Pallet & Viridian", [
-        ("EVENT_FOLLOWED_OAK_INTO_LAB", "Followed Oak into the lab"),
-        ("EVENT_FOLLOWED_OAK_INTO_LAB_2", "Followed Oak into the lab (2)"),
-        ("EVENT_OAK_ASKED_TO_CHOOSE_MON", "Oak asked to choose a starter"),
-        ("EVENT_GOT_STARTER", "Got starter"),
-        ("EVENT_BATTLED_RIVAL_IN_OAKS_LAB", "Rival battle in Oak's lab"),
-        ("EVENT_GOT_OAKS_PARCEL", "Picked up Oak's Parcel"),
-        ("OAKS_PARCEL", "Item: Oak's Parcel (leaves bag on delivery)"),
-        ("EVENT_OAK_GOT_PARCEL", "Delivered the parcel"),
-        ("EVENT_GOT_POKEDEX", "Got the Pokédex"),
-    ]),
-    ("Pewter & Mt. Moon", [
-        ("EVENT_BEAT_BROCK", "Badge 1: Brock"),
-        ("EVENT_BEAT_MT_MOON_EXIT_SUPER_NERD", "Beat Mt. Moon Super Nerd (fossil)"),
-    ]),
-    ("Cerulean", [
-        ("EVENT_BEAT_CERULEAN_RIVAL", "Rival on Nugget Bridge"),
-        ("EVENT_BEAT_MISTY", "Badge 2: Misty"),
-        ("EVENT_MET_BILL", "Met Bill"),
-        ("EVENT_BILL_SAID_USE_CELL_SEPARATOR", "Bill: use the Cell Separator"),
-        ("EVENT_USED_CELL_SEPARATOR_ON_BILL", "Used the Cell Separator"),
-        ("EVENT_MET_BILL_2", "Met Bill (restored)"),
-        ("EVENT_GOT_SS_TICKET", "Got the S.S. Ticket"),
-        ("S_S_TICKET", "Item: S.S. Ticket"),
-        ("EVENT_LEFT_BILLS_HOUSE_AFTER_HELPING", "Left Bill's house"),
-        ("EVENT_BEAT_CERULEAN_ROCKET_THIEF", "Beat the Cerulean Rocket thief"),
-    ]),
-    ("Vermilion", [
-        ("EVENT_GOT_BIKE_VOUCHER", "Got the Bike Voucher (Fan Club)"),
-        ("rival3", "Rival on the S.S. Anne"),
-        ("EVENT_RUBBED_CAPTAINS_BACK", "Rubbed the Captain's back"),
-        ("EVENT_GOT_HM01", "Got HM01 Cut"),
-        ("HM_01", "Item: HM01"),
-        ("EVENT_GOT_BICYCLE", "Got the Bicycle"),
-        ("EVENT_1ST_LOCK_OPENED", "Vermilion Gym: 1st lock"),
-        ("EVENT_2ND_LOCK_OPENED", "Vermilion Gym: 2nd lock"),
-        ("EVENT_BEAT_LT_SURGE", "Badge 3: Lt. Surge"),
-    ]),
-    ("Route 9 & Rock Tunnel", [
-        ("EVENT_BEAT_ROUTE_9_TRAINER_0", "Route 9 lass"),
-        ("EVENT_BEAT_ROCK_TUNNEL_1_TRAINER_3", "Rock Tunnel 1F Super Nerd"),
-        ("EVENT_BEAT_ROCK_TUNNEL_2_TRAINER_7", "Rock Tunnel B1F Super Nerd"),
-        ("EVENT_BEAT_ROCK_TUNNEL_2_TRAINER_5", "Rock Tunnel B1F trainer"),
-        ("EVENT_BEAT_ROCK_TUNNEL_2_TRAINER_1", "Rock Tunnel B1F Graveler trainer"),
-        ("EVENT_BEAT_ROCK_TUNNEL_1_TRAINER_5", "Rock Tunnel 1F lass (exit)"),
-    ]),
-    ("Lavender (first visit)", [
-        ("EVENT_BEAT_POKEMON_TOWER_RIVAL", "Rival in Pokémon Tower"),
-    ]),
-    ("Celadon", [
-        ("game_corner_rocket", "Beat the Game Corner Rocket"),
-        ("EVENT_FOUND_ROCKET_HIDEOUT", "Found the Rocket Hideout"),
-        ("EVENT_ROCKET_HIDEOUT_4_DOOR_UNLOCKED", "Hideout B4F door unlocked"),
-        ("EVENT_ROCKET_DROPPED_LIFT_KEY", "Rocket dropped the Lift Key"),
-        ("LIFT_KEY", "Item: Lift Key"),
-        ("EVENT_BEAT_ROCKET_HIDEOUT_GIOVANNI", "Beat Giovanni (Hideout)"),
-        ("SILPH_SCOPE", "Item: Silph Scope"),
-        ("EVENT_BEAT_ERIKA", "Badge 4: Erika"),
-    ]),
-    ("Lavender (Pokémon Tower)", [
-        ("EVENT_BEAT_GHOST_MAROWAK", "Beat the ghost Marowak"),
-        ("EVENT_RESCUED_MR_FUJI", "Rescued Mr. Fuji"),
-        ("EVENT_RESCUED_MR_FUJI_2", "Rescued Mr. Fuji (2)"),
-        ("EVENT_GOT_POKE_FLUTE", "Got the Poké Flute"),
-        ("POKE_FLUTE", "Item: Poké Flute"),
-    ]),
-    ("Fuchsia & Safari Zone", [
-        ("EVENT_BEAT_KOGA", "Badge 5: Koga"),
-        ("EVENT_GOT_HM03", "Got HM03 Surf"),
-        ("HM_03", "Item: HM03"),
-        ("GOLD_TEETH", "Item: Gold Teeth"),
-        ("EVENT_GAVE_GOLD_TEETH", "Gave the Gold Teeth to the Warden"),
-        ("EVENT_GOT_HM04", "Got HM04 Strength"),
-        ("HM_04", "Item: HM04"),
-    ]),
-    ("Saffron", [
-        ("saffron_guard", "Gave a drink to the Saffron guard"),
-        ("CARD_KEY", "Item: Card Key"),
-        ("EVENT_BEAT_SILPH_CO_RIVAL", "Rival in Silph Co."),
-        ("lapras", "Got Lapras"),
-        ("EVENT_BEAT_SILPH_CO_GIOVANNI", "Beat Giovanni (Silph Co.)"),
-        ("EVENT_BEAT_SABRINA", "Badge 6: Sabrina"),
-    ]),
-    ("Cinnabar", [
-        ("SECRET_KEY", "Item: Secret Key"),
-        ("EVENT_BEAT_BLAINE", "Badge 7: Blaine"),
-    ]),
-    ("Viridian Gym & Victory Road", [
-        ("EVENT_BEAT_VIRIDIAN_GYM_GIOVANNI", "Badge 8: Giovanni"),
-        ("EVENT_2ND_ROUTE22_RIVAL_BATTLE", "Route 22 rival (2nd) triggered"),
-        ("EVENT_BEAT_ROUTE22_RIVAL_2ND_BATTLE", "Beat the Route 22 rival (2nd)"),
-        ("EVENT_PASSED_CASCADEBADGE_CHECK", "Route 23: passed the Cascade Badge gate"),
-        ("EVENT_PASSED_EARTHBADGE_CHECK", "Route 23: passed the Earth Badge gate"),
-    ]),
-    ("Elite Four", [
-        ("EVENT_BEAT_LORELEIS_ROOM_TRAINER_0", "Lorelei"),
-        ("EVENT_BEAT_BRUNOS_ROOM_TRAINER_0", "Bruno"),
-        ("EVENT_BEAT_AGATHAS_ROOM_TRAINER_0", "Agatha"),
-        ("EVENT_BEAT_LANCE", "Lance"),
-        ("EVENT_BEAT_CHAMPION_RIVAL", "Champion"),
-        ("ELITE4_CHAMPION_EVENTS_END", "Hall of Fame"),
-    ]),
-]
+# Story order lives in the package so training-time wandb logging uses the same list.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from pokemonred_puffer.dashboard import CHAPTERS  # noqa: E402
 
 # Prints "<first_mtime>|<state_count>|<desc>" per archive folder. Folder names
 # can start with '-' (negative hash), hence ./ and --.
