@@ -55,6 +55,9 @@ testpaths = ["tests"]
 monitoring = [
     "nvitop"
 ]
+dashboard = [
+    "wandb-workspaces"
+]
 sweep = [
     "carbs @ git+https://github.com/kywch/carbs",
     "sweeps",

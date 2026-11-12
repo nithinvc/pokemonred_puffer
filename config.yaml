@@ -161,6 +161,13 @@ train:
   # How often to save checkpoints.
   checkpoint_interval: 200
 
+  # wandb metric layout. "sections": overview/, story/, chapters/, reward/, exploration/,
+  # party/, behavior/, items/, debug/, aggregated over every env's latest info, plus
+  # first_reached/* summary columns and an overview/timeline table (see dashboard.py).
+  # "legacy": every info key under environment/, averaged over the envs that reported.
+  wandb_layout: sections
+  # If true (sections layout), send a wandb alert the first time any env earns a badge.
+  wandb_alerts: False
   # Log global map overlay to wandb 
   save_overlay: True
   # How often to log global map to wandb.
